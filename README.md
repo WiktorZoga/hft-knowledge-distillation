@@ -11,11 +11,10 @@ The primary goal is to distill knowledge from a high-capacity, heavy recurrent-c
 The repository manages its dependencies via `uv`. Install the required environment packages using:
 
 ```bash
-uv pip install -r requirements.txt
-
+uv sync
 ```
 
-Data requirement: Ensure that raw dataset text files are stored directly in the `datasets/` directory. The pipeline matches file structures adhering to the `Train_Dst` and `Test_Dst` naming conventions.
+Data requirement: Download the FI2010 dataset from [Kaggle](https://www.kaggle.com/datasets/freemanone/fi2010) and place the raw dataset text files directly in the `datasets/` directory at the project root. The pipeline matches file structures adhering to the `Train_Dst` and `Test_Dst` naming conventions.
 
 ---
 

@@ -55,7 +55,7 @@ def evaluate_baseline(baseline, dataloader):
     return all_targets, all_preds
 
 def generate_performance_text(name, y_true, y_pred):
-    report_str += f"PERFORMANCE REPORT: {name}\n"
+    report_str = f"PERFORMANCE REPORT: {name}\n"
     report_str += f"Overall Accuracy: {accuracy_score(y_true, y_pred)*100:.2f}%\n\n"
     report_str += classification_report(y_true, y_pred, target_names=["Up", "Flat", "Down"], zero_division=0)
     report_str += "\n"

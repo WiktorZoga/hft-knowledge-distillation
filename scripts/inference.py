@@ -55,7 +55,10 @@ def load_and_preprocess_file(file_path: str, window_size: int) -> torch.Tensor:
 
 def main():
     args = parse_args()
-    device = resolve_device("cuda")
+
+    with open(Path(PROJECT_ROOT) / "config" / "config.yaml", "r") as f:
+        main_cfg = yaml.safe_load(f)
+    device = resolve_device(main_cfg["device"])
     
     print(f"Preprocessing target data file: {args.data_path}")
     try:

@@ -3,6 +3,3 @@ device: "cuda"
 
 development:
   use_subset: false
-
-data:
-  croissant_url: "https://www.kaggle.com/datasets/vincentmaladiere/fi-2010/croissant/download"
