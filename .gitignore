@@ -1,0 +1,11 @@
+.env
+.venv
+
+data/
+datasets/
+
+run_*/
+
+wandb/
+
+__pycache__

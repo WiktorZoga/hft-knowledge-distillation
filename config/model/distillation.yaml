@@ -1,0 +1,2 @@
+alpha: 0.7              # Weight given to the teacher's soft targets (0.7 soft, 0.3 hard labels)
+temperature: 4.0        # Smoothing factor for target logit scaling

@@ -1,0 +1,10 @@
+raw_data_dir: "datasets"
+processed_data_dir: "data/processed"
+
+window_size: 10
+num_features: 40
+num_classes: 3
+prediction_horizon_idx: 0 
+
+batch_size: 64
+train_ratio: 0.8

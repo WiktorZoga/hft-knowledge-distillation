@@ -1,0 +1,6 @@
+model_name: "TeacherDeepLOB"
+lr: 0.001
+weight_decay: 0.0001
+epochs: 1 # 20
+save_dir: "models/saved/teacher"
+checkpoint_name: "best_teacher.pt"

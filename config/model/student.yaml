@@ -1,0 +1,6 @@
+model_name: "StudentMLP"
+lr: 0.001
+weight_decay: 0.00001
+epochs: 1 # 30
+save_dir: "models/saved/student"
+checkpoint_name: "best_student.pt"
