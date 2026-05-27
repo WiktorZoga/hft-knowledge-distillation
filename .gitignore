@@ -1,7 +1,8 @@
 .env
 .venv
 
-data/
+data/raw
+data/processed
 datasets/
 
 run_*/
