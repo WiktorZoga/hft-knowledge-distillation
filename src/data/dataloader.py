@@ -28,8 +28,8 @@ def create_dataloaders():
     use_subset = main_cfg["development"]["use_subset"]
     
     # Target patterns matched directly against the extracted dataset files
-    train_val_files = sorted(glob.glob(os.path.join(raw_dir, "*Train_Dst*.txt")))
-    test_files = sorted(glob.glob(os.path.join(raw_dir, "*Test_Dst*.txt")))
+    train_val_files = sorted(glob.glob(os.path.join(raw_dir, "*train*.csv")) or glob.glob(os.path.join(raw_dir, "*Train_Dst*.txt")))
+    test_files = sorted(glob.glob(os.path.join(raw_dir, "*test*.csv")) or glob.glob(os.path.join(raw_dir, "*Test_Dst*.txt")))
     
     if not train_val_files or not test_files:
         raise RuntimeError(f"Source files missing inside target directory: {raw_dir}")

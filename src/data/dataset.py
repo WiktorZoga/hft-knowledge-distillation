@@ -22,11 +22,15 @@ class FI2010Dataset(Dataset):
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Data file missing: {path}")
                 
-            data = np.loadtxt(path)
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".csv":
+                import pandas as pd
+                data = pd.read_csv(path, index_col=0).values
+            else:
+                data = np.loadtxt(path).T
             if use_subset:
-                data = data[:, :5000]
+                data = data[:5000, :]
                 
-            data = data.T
             features = data[:, :40]
             labels = data[:, -5:] - 1
             
