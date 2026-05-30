@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from pathlib import Path
@@ -31,9 +32,14 @@ def load_and_preprocess_file(file_path: str, window_size: int) -> torch.Tensor:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Target data file not found at: {file_path}")
         
-    # Load raw text matrix (transposed to match features dimension context)
-    data = np.loadtxt(file_path)
-    data = data.T
+    # Load the raw matrix in per-sample orientation (N, features+labels).
+    # CSVs carry a header row and a leading index column; .txt files use the
+    # classic DeepLOB orientation (rows, samples) and need transposing.
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".csv":
+        data = pd.read_csv(file_path, index_col=0).to_numpy()
+    else:
+        data = np.loadtxt(file_path).T
     features = data[:, :40]
     
     # Apply standard normalization mapping in-place for this specific file scope
