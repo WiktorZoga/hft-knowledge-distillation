@@ -1,21 +1,12 @@
-import os
 import shutil
 from pathlib import Path
-from dotenv import load_dotenv
 import kagglehub
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
-ENV_PATH = PROJECT_ROOT / ".env"
 TARGET_DATA_DIR = PROJECT_ROOT / "datasets"
-
 TARGET_DATA_DIR.mkdir(exist_ok=True)
-
-load_dotenv(dotenv_path=ENV_PATH)
-
-if not os.getenv("KAGGLE_USERNAME") or not os.getenv("KAGGLE_KEY"):
-    raise ValueError("KAGGLE_USERNAME and KAGGLE_KEY must be set in your .env file.")
 
 print(f"Downloading FI2010 dataset via Kaggle API into: {TARGET_DATA_DIR}")
 
