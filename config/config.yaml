@@ -1,5 +1,9 @@
 seed: 42
-device: "cuda"
+device: "cuda"   # "cuda" / "mps" auto-detected; falls back to CPU. Use "cpu" to force.
+
+wandb:
+  project: "hft-knowledge-distillation"
+  mode: "online"   # online | offline | disabled
 
 development:
   use_subset: false

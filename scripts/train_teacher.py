@@ -14,10 +14,11 @@ import yaml
 from pathlib import Path
 from tqdm import tqdm
 import wandb
+from dotenv import load_dotenv
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
-from src.utils import resolve_device
+from src.utils import resolve_device, set_seed
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Teacher Model (DeepLOB)")
@@ -25,6 +26,8 @@ def parse_args():
     parser.add_argument("--lr", type=float, help="Override learning rate")
     parser.add_argument("--weight_decay", type=float, help="Override weight decay")
     parser.add_argument("--epochs", type=int, help="Override total epochs")
+    parser.add_argument("--wandb_mode", type=str, choices=["online", "offline", "disabled"],
+                        help="Override Weights & Biases logging mode")
     return parser.parse_args()
 
 def load_yaml(path: Path) -> dict:
@@ -86,16 +89,22 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
 def main():
     args = parse_args()
     root_path = Path(PROJECT_ROOT)
-    
+
+    # Load secrets (e.g. WANDB_API_KEY) from .env so logging works non-interactively.
+    load_dotenv(root_path / ".env")
+
     main_cfg = load_yaml(root_path / "config" / "config.yaml")
     teacher_cfg = load_yaml(root_path / args.config)
-    
+
     # CLI Overrides
     if args.lr: teacher_cfg["lr"] = args.lr
     if args.weight_decay: teacher_cfg["weight_decay"] = args.weight_decay
     if args.epochs: teacher_cfg["epochs"] = args.epochs
 
-    torch.manual_seed(main_cfg["seed"])
+    wandb_cfg = main_cfg.get("wandb", {})
+    wandb_mode = args.wandb_mode or wandb_cfg.get("mode", "online")
+
+    set_seed(main_cfg["seed"])
     device = resolve_device(main_cfg["device"])
     
     # Generate timestamped run identifier
@@ -111,9 +120,10 @@ def main():
         yaml.safe_dump({**main_cfg, **teacher_cfg}, f)
         
     wandb.init(
-        project="hft-knowledge-distillation",
+        project=wandb_cfg.get("project", "hft-knowledge-distillation"),
         job_type="teacher-training",
         name=run_name,
+        mode=wandb_mode,
         config={**main_cfg, **teacher_cfg}
     )
     

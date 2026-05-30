@@ -11,6 +11,7 @@ import torch.optim as optim
 import yaml
 import optuna
 import wandb
+from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
 
@@ -18,7 +19,7 @@ from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
-from src.utils import resolve_device
+from src.utils import resolve_device, set_seed
 
 def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
@@ -62,16 +63,17 @@ def evaluate(student, loader, device):
         correct += predicted.eq(y).sum().item()
     return correct / total
 
-def objective(trial, teacher, train_loader, val_loader, data_cfg, device, epochs):
+def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, epochs):
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     alpha = trial.suggest_float("alpha", 0.3, 0.9)
     temperature = trial.suggest_float("temperature", 2.0, 8.0)
 
     run = wandb.init(
-        project="hft-knowledge-distillation",
+        project=wandb_cfg.get("project", "hft-knowledge-distillation"),
         job_type="optuna-trial",
         name=f"trial_{trial.number}",
+        mode=wandb_mode,
         config={
             "lr": lr,
             "weight_decay": weight_decay,
@@ -114,11 +116,17 @@ def main():
     args = parse_args()
     root_path = Path(PROJECT_ROOT)
 
+    # Load secrets (e.g. WANDB_API_KEY) from .env so logging works non-interactively.
+    load_dotenv(root_path / ".env")
+
     main_cfg = load_yaml(root_path / "config" / "config.yaml")
     teacher_cfg = load_yaml(root_path / "config" / "model" / "teacher.yaml")
     data_cfg = load_yaml(root_path / "config" / "dataset" / "fi2010.yaml")
 
-    torch.manual_seed(main_cfg["seed"])
+    wandb_cfg = main_cfg.get("wandb", {})
+    wandb_mode = wandb_cfg.get("mode", "online")
+
+    set_seed(main_cfg["seed"])
     device = resolve_device(main_cfg["device"])
 
     print("Loading data pipelines...")
@@ -139,7 +147,7 @@ def main():
     )
 
     study.optimize(
-        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, device, args.epochs),
+        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, args.epochs),
         n_trials=args.trials,
         show_progress_bar=True,
     )
