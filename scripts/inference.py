@@ -97,11 +97,16 @@ def main():
         model = model.to(device)
         model.eval()
         
-        # Stream evaluation contexts through the network
-        input_tensor = input_tensor.to(device)
+        # Stream evaluation contexts through the network in batches
+        batch_size = 512
+        all_preds = []
         with torch.no_grad():
-            outputs = model(input_tensor)
-            _, preds = outputs.max(1)
+            for i in range(0, len(input_tensor), batch_size):
+                batch = input_tensor[i:i + batch_size].to(device)
+                outputs = model(batch)
+                _, batch_preds = outputs.max(1)
+                all_preds.append(batch_preds.cpu())
+        preds = torch.cat(all_preds)
             
     # 3. Output Aggregation Summary
     preds_np = preds.cpu().numpy()

@@ -95,6 +95,7 @@ def main():
     student_cfg = load_yaml(root_path / args.config)
     teacher_cfg = load_yaml(root_path / "config" / "model" / "teacher.yaml")
     distill_cfg = load_yaml(root_path / "config" / "model" / "distillation.yaml")
+    data_cfg = load_yaml(root_path / "config" / "dataset" / "fi2010.yaml")
     
     # CLI Overrides
     if args.lr: student_cfg["lr"] = args.lr
@@ -135,7 +136,7 @@ def main():
     teacher.load_state_dict(torch.load(teacher_weights_path, map_location=device))
     teacher.eval()
     
-    student = StudentMLP(window_size=main_cfg.get("window_size", 10), num_features=40, num_classes=3).to(device)
+    student = StudentMLP(window_size=data_cfg["window_size"], num_features=40, num_classes=3).to(device)
     criterion = KnowledgeDistillationLoss(alpha=distill_cfg["alpha"], temperature=distill_cfg["temperature"])
     optimizer = optim.Adam(student.parameters(), lr=student_cfg["lr"], weight_decay=student_cfg["weight_decay"])
     

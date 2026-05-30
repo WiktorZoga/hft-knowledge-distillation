@@ -67,6 +67,7 @@ def main():
     main_cfg = load_yaml(root_path / "config" / "config.yaml")
     teacher_cfg = load_yaml(root_path / "config" / "model" / "teacher.yaml")
     student_cfg = load_yaml(root_path / "config" / "model" / "student.yaml")
+    data_cfg = load_yaml(root_path / "config" / "dataset" / "fi2010.yaml")
     
     device = resolve_device(main_cfg["device"])
     
@@ -104,7 +105,7 @@ def main():
         student_path = root_path / student_cfg["save_dir"] / args.student_run / student_cfg["checkpoint_name"]
         if student_path.exists():
             print(f"\nLoading Student network state from {args.student_run} and running inference...")
-            student = StudentMLP(window_size=main_cfg.get("window_size", 10), num_features=40, num_classes=3).to(device)
+            student = StudentMLP(window_size=data_cfg["window_size"], num_features=40, num_classes=3).to(device)
             student.load_state_dict(torch.load(student_path, map_location=device))
             _, y_pred_student = evaluate_ml_model(student, test_loader, device)
             student_report = generate_performance_text(f"Student Model (MLP via Distillation) - {args.student_run}", y_true, y_pred_student)
@@ -112,7 +113,7 @@ def main():
             
             # Save report locally inside the student's run folder
             with open(student_path.parent / "evaluation_report.txt", "w") as f:
-                f.write(baseline_report + "\n" + student_report)
+                f.write(baseline_report + "\n" + teacher_report + "\n" + student_report)
         else:
             print(f"\n[WARNING] Explicit student checkpoint file missing at target path: {student_path}")
 

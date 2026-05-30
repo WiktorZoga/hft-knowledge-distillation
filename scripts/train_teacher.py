@@ -21,7 +21,6 @@ from src.utils import resolve_device
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Teacher Model (DeepLOB)")
-    parser.add_name = "teacher_training"
     parser.add_argument("--config", type=str, default="config/model/teacher.yaml", help="Path to teacher YAML config")
     parser.add_argument("--lr", type=float, help="Override learning rate")
     parser.add_argument("--weight_decay", type=float, help="Override weight decay")
