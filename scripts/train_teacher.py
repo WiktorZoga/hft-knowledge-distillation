@@ -15,6 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 import wandb
 from dotenv import load_dotenv
+from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
@@ -39,30 +40,35 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, total_ep
     running_loss = 0.0
     correct = 0
     total = 0
-    
+    all_preds = []
+    all_targets = []
+
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Train)", unit="batch", leave=False)
     for x, y in pbar:
         x, y = x.to(device), y.to(device)
-        
+
         optimizer.zero_grad()
         outputs = model(x)
         loss = criterion(outputs, y)
         loss.backward()
         optimizer.step()
-        
+
         running_loss += loss.item() * x.size(0)
         _, predicted = outputs.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
-        
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
+
         wandb.log({
             "train/batch_loss": loss.item(),
             "train/batch_acc": predicted.eq(y).sum().item() / y.size(0)
         })
-        
+
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
-        
-    return running_loss / total, correct / total
+
+    f1_macro = compute_macro_f1(all_targets, all_preds)
+    return running_loss / total, correct / total, f1_macro
 
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
@@ -70,21 +76,36 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
     running_loss = 0.0
     correct = 0
     total = 0
-    
+    all_preds = []
+    all_targets = []
+
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Val)", unit="batch", leave=False)
     for x, y in pbar:
         x, y = x.to(device), y.to(device)
         outputs = model(x)
         loss = criterion(outputs, y)
-        
+
         running_loss += loss.item() * x.size(0)
         _, predicted = outputs.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
-        
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
+
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
-        
-    return running_loss / total, correct / total
+
+    f1_macro = compute_macro_f1(all_targets, all_preds)
+    return running_loss / total, correct / total, f1_macro
+
+def compute_macro_f1(targets, preds):
+    """Macro-averaged F1 over the collected per-batch prediction tensors.
+
+    Macro (not weighted) so the dominant 'Flat' class can't mask poor
+    Up/Down recall — the metric that actually matters for LOB direction.
+    """
+    y_true = torch.cat(targets).numpy()
+    y_pred = torch.cat(preds).numpy()
+    return f1_score(y_true, y_pred, average="macro", zero_division=0)
 
 def main():
     args = parse_args()
@@ -95,6 +116,10 @@ def main():
 
     main_cfg = load_yaml(root_path / "config" / "config.yaml")
     teacher_cfg = load_yaml(root_path / args.config)
+    # Dataset config (window_size, horizon, batch_size, ...) is consumed inside
+    # create_dataloaders(); load it here too so every configurable knob lands in
+    # the W&B run config and the on-disk resolved snapshot for later analysis.
+    data_cfg = load_yaml(root_path / "config" / "dataset" / "fi2010.yaml")
 
     # CLI Overrides
     if args.lr: teacher_cfg["lr"] = args.lr
@@ -116,15 +141,16 @@ def main():
     checkpoint_path = run_dir / teacher_cfg["checkpoint_name"]
     
     # Dump active configuration profile to the run folder
+    resolved_cfg = {**main_cfg, **teacher_cfg, **data_cfg}
     with open(run_dir / "resolved_config.yaml", "w") as f:
-        yaml.safe_dump({**main_cfg, **teacher_cfg}, f)
-        
+        yaml.safe_dump(resolved_cfg, f)
+
     wandb.init(
         project=wandb_cfg.get("project", "hft-knowledge-distillation"),
         job_type="teacher-training",
         name=run_name,
         mode=wandb_mode,
-        config={**main_cfg, **teacher_cfg}
+        config=resolved_cfg
     )
     
     print("Loading data configurations and streaming pipeline...")
@@ -145,21 +171,23 @@ def main():
     print(f"Target run workspace directory: {run_dir}")
     
     for epoch in range(1, total_epochs + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device, epoch, total_epochs)
-        
+        train_loss, train_acc, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs)
+        val_loss, val_acc, val_f1 = evaluate(model, val_loader, criterion, device, epoch, total_epochs)
+
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
-              f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% || "
-              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc*100:.2f}%")
-        
+              f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1:.4f} || "
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc*100:.2f}% | Val F1: {val_f1:.4f}")
+
         wandb.log({
             "epoch": epoch,
             "train/epoch_loss": train_loss,
             "train/epoch_acc": train_acc,
+            "train/epoch_f1_macro": train_f1,
             "val/epoch_loss": val_loss,
-            "val/epoch_acc": val_acc
+            "val/epoch_acc": val_acc,
+            "val/epoch_f1_macro": val_f1
         })
-        
+
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), checkpoint_path)

@@ -14,6 +14,7 @@ from pathlib import Path
 from tqdm import tqdm
 import wandb
 from dotenv import load_dotenv
+from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
@@ -37,11 +38,23 @@ def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+def compute_macro_f1(targets, preds):
+    """Macro-averaged F1 over the collected per-batch prediction tensors.
+
+    Macro (not weighted) so the dominant 'Flat' class can't mask poor
+    Up/Down recall — the metric that actually matters for LOB direction.
+    """
+    y_true = torch.cat(targets).numpy()
+    y_pred = torch.cat(preds).numpy()
+    return f1_score(y_true, y_pred, average="macro", zero_division=0)
+
 def train_student_epoch(student, teacher, dataloader, criterion, optimizer, device, epoch, total_epochs):
     student.train()
     running_loss = 0.0
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Student Train)", unit="batch", leave=False)
     for x, y in pbar:
@@ -61,6 +74,8 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
         _, predicted = student_logits.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
 
         wandb.log({
             "student_train/batch_loss": loss.item(),
@@ -69,13 +84,16 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
 
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
-    return running_loss / total, correct / total
+    f1_macro = compute_macro_f1(all_targets, all_preds)
+    return running_loss / total, correct / total, f1_macro
 
 @torch.no_grad()
 def evaluate_student(student, dataloader, device, epoch, total_epochs):
     student.eval()
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Student Val)", unit="batch", leave=False)
     for x, y in pbar:
@@ -85,10 +103,13 @@ def evaluate_student(student, dataloader, device, epoch, total_epochs):
         _, predicted = outputs.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
 
         pbar.set_postfix({"acc": f"{(correct/total)*100:.2f}%"})
 
-    return correct / total
+    f1_macro = compute_macro_f1(all_targets, all_preds)
+    return correct / total, f1_macro
 
 def main():
     args = parse_args()
@@ -122,15 +143,21 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = run_dir / student_cfg["checkpoint_name"]
 
+    # Merge every configurable knob so cross-run analysis sees the full picture.
+    # data_cfg (window_size, horizon, batch_size, ...) was previously missing.
+    # teacher_run is recorded for provenance; we don't splat teacher_cfg because
+    # its keys (lr, epochs, ...) would clobber the student's own values.
+    resolved_cfg = {**main_cfg, **student_cfg, **distill_cfg, **data_cfg,
+                    "teacher_run": args.teacher_run}
     with open(run_dir / "resolved_config.yaml", "w") as f:
-        yaml.safe_dump({**main_cfg, **student_cfg, **distill_cfg}, f)
+        yaml.safe_dump(resolved_cfg, f)
 
     wandb.init(
         project=wandb_cfg.get("project", "hft-knowledge-distillation"),
         job_type="distillation",
         name=run_name,
         mode=wandb_mode,
-        config={**main_cfg, **student_cfg, **distill_cfg}
+        config=resolved_cfg
     )
 
     print("Loading data configurations and streaming pipeline...")
@@ -159,20 +186,22 @@ def main():
     print("=======================================================================")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss, train_acc = train_student_epoch(
+        train_loss, train_acc, train_f1 = train_student_epoch(
             student, teacher, train_loader, criterion, optimizer, device, epoch, total_epochs
         )
-        val_acc = evaluate_student(student, val_loader, device, epoch, total_epochs)
+        val_acc, val_f1 = evaluate_student(student, val_loader, device, epoch, total_epochs)
 
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
-              f"Student Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% || "
-              f"Student Val Acc: {val_acc*100:.2f}%")
+              f"Student Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1:.4f} || "
+              f"Student Val Acc: {val_acc*100:.2f}% | Val F1: {val_f1:.4f}")
 
         wandb.log({
             "epoch": epoch,
             "student/epoch_loss": train_loss,
             "student/epoch_train_acc": train_acc,
-            "student/epoch_val_acc": val_acc
+            "student/epoch_train_f1_macro": train_f1,
+            "student/epoch_val_acc": val_acc,
+            "student/epoch_val_f1_macro": val_f1
         })
 
         if val_acc > best_val_acc:

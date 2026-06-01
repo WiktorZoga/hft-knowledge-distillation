@@ -14,6 +14,7 @@ import wandb
 from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
@@ -55,15 +56,22 @@ def evaluate(student, loader, device):
     student.eval()
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         outputs = student(x)
         _, predicted = outputs.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
-    return correct / total
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
+    # Macro F1 so the dominant 'Flat' class can't mask poor Up/Down recall.
+    f1_macro = f1_score(torch.cat(all_targets).numpy(), torch.cat(all_preds).numpy(),
+                        average="macro", zero_division=0)
+    return correct / total, f1_macro
 
-def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, epochs):
+def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, epochs, seed, teacher_run):
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     alpha = trial.suggest_float("alpha", 0.3, 0.9)
@@ -74,6 +82,9 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wan
         job_type="optuna-trial",
         name=f"trial_{trial.number}",
         mode=wandb_mode,
+        # Log the searched hyperparameters AND the fixed context (dataset knobs,
+        # seed, teacher provenance) so each trial is self-describing for later
+        # cross-run analysis.
         config={
             "lr": lr,
             "weight_decay": weight_decay,
@@ -81,6 +92,9 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wan
             "temperature": temperature,
             "epochs": epochs,
             "trial": trial.number,
+            "seed": seed,
+            "teacher_run": teacher_run,
+            **data_cfg,
         },
         reinit=True,
     )
@@ -97,9 +111,10 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wan
     best_val_acc = 0.0
     for epoch in range(1, epochs + 1):
         train_acc = train_one_epoch(student, teacher, train_loader, criterion, optimizer, device)
-        val_acc = evaluate(student, val_loader, device)
+        val_acc, val_f1 = evaluate(student, val_loader, device)
 
-        wandb.log({"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc})
+        wandb.log({"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc,
+                   "val_f1_macro": val_f1})
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -147,7 +162,7 @@ def main():
     )
 
     study.optimize(
-        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, args.epochs),
+        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, args.epochs, main_cfg["seed"], args.teacher_run),
         n_trials=args.trials,
         show_progress_bar=True,
     )
