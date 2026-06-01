@@ -1,7 +1,7 @@
 raw_data_dir: "datasets"
 processed_data_dir: "data/processed"
 
-window_size: 10
+window_size: 50
 num_features: 40
 num_classes: 3
 prediction_horizon_idx: 0 

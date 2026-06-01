@@ -7,6 +7,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -100,6 +101,23 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
 # Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
 CLASS_NAMES = ["up", "flat", "down"]
 
+def compute_class_weights(dataset, num_classes, device):
+    """Inverse-frequency class weights over the *windowed* training targets.
+
+    Mirrors sklearn's 'balanced' scheme: ``w_c = N / (num_classes * count_c)``.
+    Computed only over the labels actually consumed by ``__getitem__`` (the
+    horizon column, offset by ``window_size - 1``) so the weights match what the
+    model is trained against rather than the raw label pool. Counters the heavy
+    'flat' majority in FI2010 so Up/Down stop being drowned out.
+    """
+    start = dataset.window_size - 1
+    targets = dataset.labels[start: start + dataset.num_samples, dataset.prediction_horizon_idx]
+    counts = np.bincount(targets, minlength=num_classes).astype(np.float64)
+    counts[counts == 0] = 1.0  # avoid div-by-zero for an absent class
+    weights = targets.shape[0] / (num_classes * counts)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
 def compute_f1(targets, preds):
     """Macro F1 plus per-class F1 over the collected per-batch prediction tensors.
 
@@ -164,19 +182,36 @@ def main():
     train_loader, val_loader, _ = create_dataloaders()
     
     model = TeacherDeepLOB(num_classes=3).to(device)
-    criterion = nn.CrossEntropyLoss()
+
+    # Class-imbalance handling: weight CE by inverse training-class frequency.
+    if teacher_cfg.get("class_weights", True):
+        class_weights = compute_class_weights(train_loader.dataset, num_classes=3, device=device)
+        print(f"Using inverse-frequency class weights (up/flat/down): "
+              f"{class_weights.cpu().numpy().round(3).tolist()}")
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
     optimizer = optim.Adam(
         model.parameters(), 
         lr=teacher_cfg["lr"], 
         weight_decay=teacher_cfg["weight_decay"]
     )
     
-    best_val_acc = 0.0
     total_epochs = teacher_cfg["epochs"]
-    
+
+    # Early stopping: monitor a validation metric (higher = better) and stop once
+    # it has not improved for `patience` consecutive epochs. The best-so-far
+    # checkpoint is kept on disk.
+    monitor = teacher_cfg.get("early_stopping_metric", "val_f1_macro")
+    patience = teacher_cfg.get("early_stopping_patience", 8)
+    best_metric = float("-inf")
+    epochs_no_improve = 0
+
     print(f"\nStarting Teacher model execution loop on target device: {device}")
     print(f"Target run workspace directory: {run_dir}")
-    
+    print(f"Early stopping on '{monitor}' with patience={patience}")
+
     for epoch in range(1, total_epochs + 1):
         train_loss, train_acc, train_f1, train_f1_pc = train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs)
         val_loss, val_acc, val_f1, val_f1_pc = evaluate(model, val_loader, criterion, device, epoch, total_epochs)
@@ -200,10 +235,21 @@ def main():
             log_payload[f"val/epoch_f1_{cls}"] = val_f1_pc[cls]
         wandb.log(log_payload)
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        current = val_f1 if monitor == "val_f1_macro" else val_acc
+        if current > best_metric:
+            best_metric = current
+            epochs_no_improve = 0
             torch.save(model.state_dict(), checkpoint_path)
-            print(f" => Saved new structural model verification checkpoint to: {checkpoint_path}")
+            print(f" => New best {monitor}={current:.4f}; saved checkpoint to: {checkpoint_path}")
+        else:
+            epochs_no_improve += 1
+            print(f" => No improvement on {monitor} for {epochs_no_improve}/{patience} epoch(s) "
+                  f"(best={best_metric:.4f})")
+            if epochs_no_improve >= patience:
+                print(f"Early stopping triggered at epoch {epoch}.")
+                break
+
+    wandb.run.summary["best/" + monitor] = best_metric
 
     print("\nOPTIMIZATION PIPELINE COMPLETE")
     wandb.finish()
