@@ -38,15 +38,22 @@ def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-def compute_macro_f1(targets, preds):
-    """Macro-averaged F1 over the collected per-batch prediction tensors.
+# Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
+CLASS_NAMES = ["up", "flat", "down"]
 
-    Macro (not weighted) so the dominant 'Flat' class can't mask poor
-    Up/Down recall — the metric that actually matters for LOB direction.
+def compute_f1(targets, preds):
+    """Macro F1 plus per-class F1 over the collected per-batch prediction tensors.
+
+    Macro (not weighted) so the dominant 'Flat' class can't mask poor Up/Down
+    recall — the metric that actually matters for LOB direction. Per-class F1
+    exposes exactly which direction the model is missing. `labels=[0,1,2]` pins
+    the order and keeps a class present even if absent from a given split.
     """
     y_true = torch.cat(targets).numpy()
     y_pred = torch.cat(preds).numpy()
-    return f1_score(y_true, y_pred, average="macro", zero_division=0)
+    macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    per_class = f1_score(y_true, y_pred, labels=[0, 1, 2], average=None, zero_division=0)
+    return macro, dict(zip(CLASS_NAMES, per_class))
 
 def train_student_epoch(student, teacher, dataloader, criterion, optimizer, device, epoch, total_epochs):
     student.train()
@@ -84,8 +91,8 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
 
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
-    f1_macro = compute_macro_f1(all_targets, all_preds)
-    return running_loss / total, correct / total, f1_macro
+    f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
+    return running_loss / total, correct / total, f1_macro, f1_per_class
 
 @torch.no_grad()
 def evaluate_student(student, dataloader, device, epoch, total_epochs):
@@ -108,8 +115,8 @@ def evaluate_student(student, dataloader, device, epoch, total_epochs):
 
         pbar.set_postfix({"acc": f"{(correct/total)*100:.2f}%"})
 
-    f1_macro = compute_macro_f1(all_targets, all_preds)
-    return correct / total, f1_macro
+    f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
+    return correct / total, f1_macro, f1_per_class
 
 def main():
     args = parse_args()
@@ -186,23 +193,28 @@ def main():
     print("=======================================================================")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss, train_acc, train_f1 = train_student_epoch(
+        train_loss, train_acc, train_f1, train_f1_pc = train_student_epoch(
             student, teacher, train_loader, criterion, optimizer, device, epoch, total_epochs
         )
-        val_acc, val_f1 = evaluate_student(student, val_loader, device, epoch, total_epochs)
+        val_acc, val_f1, val_f1_pc = evaluate_student(student, val_loader, device, epoch, total_epochs)
 
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
               f"Student Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1:.4f} || "
-              f"Student Val Acc: {val_acc*100:.2f}% | Val F1: {val_f1:.4f}")
+              f"Student Val Acc: {val_acc*100:.2f}% | Val F1: {val_f1:.4f} "
+              f"(up {val_f1_pc['up']:.3f} / flat {val_f1_pc['flat']:.3f} / down {val_f1_pc['down']:.3f})")
 
-        wandb.log({
+        log_payload = {
             "epoch": epoch,
             "student/epoch_loss": train_loss,
             "student/epoch_train_acc": train_acc,
             "student/epoch_train_f1_macro": train_f1,
             "student/epoch_val_acc": val_acc,
-            "student/epoch_val_f1_macro": val_f1
-        })
+            "student/epoch_val_f1_macro": val_f1,
+        }
+        for cls in CLASS_NAMES:
+            log_payload[f"student/epoch_train_f1_{cls}"] = train_f1_pc[cls]
+            log_payload[f"student/epoch_val_f1_{cls}"] = val_f1_pc[cls]
+        wandb.log(log_payload)
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc

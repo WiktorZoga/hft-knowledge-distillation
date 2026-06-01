@@ -22,6 +22,9 @@ from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
 from src.utils import resolve_device, set_seed
 
+# Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
+CLASS_NAMES = ["up", "flat", "down"]
+
 def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -66,10 +69,13 @@ def evaluate(student, loader, device):
         correct += predicted.eq(y).sum().item()
         all_preds.append(predicted.cpu())
         all_targets.append(y.cpu())
-    # Macro F1 so the dominant 'Flat' class can't mask poor Up/Down recall.
-    f1_macro = f1_score(torch.cat(all_targets).numpy(), torch.cat(all_preds).numpy(),
-                        average="macro", zero_division=0)
-    return correct / total, f1_macro
+    y_true = torch.cat(all_targets).numpy()
+    y_pred = torch.cat(all_preds).numpy()
+    # Macro F1 so the dominant 'Flat' class can't mask poor Up/Down recall;
+    # per-class F1 (0=Up, 1=Flat, 2=Down) shows which direction is missed.
+    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    f1_per_class = f1_score(y_true, y_pred, labels=[0, 1, 2], average=None, zero_division=0)
+    return correct / total, f1_macro, dict(zip(CLASS_NAMES, f1_per_class))
 
 def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, epochs, seed, teacher_run):
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
@@ -111,10 +117,13 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wan
     best_val_acc = 0.0
     for epoch in range(1, epochs + 1):
         train_acc = train_one_epoch(student, teacher, train_loader, criterion, optimizer, device)
-        val_acc, val_f1 = evaluate(student, val_loader, device)
+        val_acc, val_f1, val_f1_pc = evaluate(student, val_loader, device)
 
-        wandb.log({"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc,
-                   "val_f1_macro": val_f1})
+        log_payload = {"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc,
+                       "val_f1_macro": val_f1}
+        for cls in CLASS_NAMES:
+            log_payload[f"val_f1_{cls}"] = val_f1_pc[cls]
+        wandb.log(log_payload)
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
