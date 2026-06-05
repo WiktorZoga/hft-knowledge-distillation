@@ -1,6 +1,15 @@
 model_name: "TeacherDeepLOB"
 lr: 0.001
 weight_decay: 0.0001
-epochs: 1 # 20
+epochs: 20
 save_dir: "models/saved/teacher"
 checkpoint_name: "best_teacher.pt"
+
+# Weight the CrossEntropy loss by inverse class frequency to counter the heavy
+# 'flat' majority in FI2010 (≈64% at horizon 0). Set false for plain CE.
+class_weights: true
+
+# Early stopping: stop once the monitored validation metric has not improved for
+# `patience` consecutive epochs. Metric is one of: val_acc | val_f1_macro.
+early_stopping_patience: 8
+early_stopping_metric: "val_f1_macro"

@@ -11,14 +11,19 @@ import torch.optim as optim
 import yaml
 import optuna
 import wandb
+from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
-from src.utils import resolve_device
+from src.utils import resolve_device, set_seed
+
+# Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
+CLASS_NAMES = ["up", "flat", "down"]
 
 def load_yaml(path: Path) -> dict:
     with open(path, "r") as f:
@@ -54,24 +59,38 @@ def evaluate(student, loader, device):
     student.eval()
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         outputs = student(x)
         _, predicted = outputs.max(1)
         total += y.size(0)
         correct += predicted.eq(y).sum().item()
-    return correct / total
+        all_preds.append(predicted.cpu())
+        all_targets.append(y.cpu())
+    y_true = torch.cat(all_targets).numpy()
+    y_pred = torch.cat(all_preds).numpy()
+    # Macro F1 so the dominant 'Flat' class can't mask poor Up/Down recall;
+    # per-class F1 (0=Up, 1=Flat, 2=Down) shows which direction is missed.
+    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    f1_per_class = f1_score(y_true, y_pred, labels=[0, 1, 2], average=None, zero_division=0)
+    return correct / total, f1_macro, dict(zip(CLASS_NAMES, f1_per_class))
 
-def objective(trial, teacher, train_loader, val_loader, data_cfg, device, epochs):
+def objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, epochs, seed, teacher_run):
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     alpha = trial.suggest_float("alpha", 0.3, 0.9)
     temperature = trial.suggest_float("temperature", 2.0, 8.0)
 
     run = wandb.init(
-        project="hft-knowledge-distillation",
+        project=wandb_cfg.get("project", "hft-knowledge-distillation"),
         job_type="optuna-trial",
         name=f"trial_{trial.number}",
+        mode=wandb_mode,
+        # Log the searched hyperparameters AND the fixed context (dataset knobs,
+        # seed, teacher provenance) so each trial is self-describing for later
+        # cross-run analysis.
         config={
             "lr": lr,
             "weight_decay": weight_decay,
@@ -79,6 +98,9 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, device, epochs
             "temperature": temperature,
             "epochs": epochs,
             "trial": trial.number,
+            "seed": seed,
+            "teacher_run": teacher_run,
+            **data_cfg,
         },
         reinit=True,
     )
@@ -95,9 +117,13 @@ def objective(trial, teacher, train_loader, val_loader, data_cfg, device, epochs
     best_val_acc = 0.0
     for epoch in range(1, epochs + 1):
         train_acc = train_one_epoch(student, teacher, train_loader, criterion, optimizer, device)
-        val_acc = evaluate(student, val_loader, device)
+        val_acc, val_f1, val_f1_pc = evaluate(student, val_loader, device)
 
-        wandb.log({"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc})
+        log_payload = {"epoch": epoch, "train_acc": train_acc, "val_acc": val_acc,
+                       "val_f1_macro": val_f1}
+        for cls in CLASS_NAMES:
+            log_payload[f"val_f1_{cls}"] = val_f1_pc[cls]
+        wandb.log(log_payload)
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -114,11 +140,17 @@ def main():
     args = parse_args()
     root_path = Path(PROJECT_ROOT)
 
+    # Load secrets (e.g. WANDB_API_KEY) from .env so logging works non-interactively.
+    load_dotenv(root_path / ".env")
+
     main_cfg = load_yaml(root_path / "config" / "config.yaml")
     teacher_cfg = load_yaml(root_path / "config" / "model" / "teacher.yaml")
     data_cfg = load_yaml(root_path / "config" / "dataset" / "fi2010.yaml")
 
-    torch.manual_seed(main_cfg["seed"])
+    wandb_cfg = main_cfg.get("wandb", {})
+    wandb_mode = wandb_cfg.get("mode", "online")
+
+    set_seed(main_cfg["seed"])
     device = resolve_device(main_cfg["device"])
 
     print("Loading data pipelines...")
@@ -139,7 +171,7 @@ def main():
     )
 
     study.optimize(
-        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, device, args.epochs),
+        lambda trial: objective(trial, teacher, train_loader, val_loader, data_cfg, wandb_cfg, wandb_mode, device, args.epochs, main_cfg["seed"], args.teacher_run),
         n_trials=args.trials,
         show_progress_bar=True,
     )

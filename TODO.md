@@ -18,6 +18,7 @@ This document outlines the remaining optimization, benchmarking, and analytical 
 ## Data Visualization and Analysis
 - [ ] **Inference Latency Benchmarking Plots:** Generate bar charts and distribution plots comparing the execution speed of the Teacher and Student models to visually demonstrate HFT compliance.
 - [ ] **Confusion Matrix Generation:** Extract and plot classification confusion matrices across all three execution branches, tracking minority classes (`Up` and `Down` price movements).
+- [ ] **Consider weighted F1:** We currently log macro-F1 (plain unweighted mean of the per-class F1 scores — `Up`, `Flat`, `Down` all count equally). Consider also tracking a weighted F1 that assigns higher weight to the `Up` and `Down` classes, since those directional signals are the ones that matter for HFT (`Flat` ≈ "no opportunity"). This would more directly reward correctly predicting price movement over correctly predicting inactivity.
 - [ ] **WandB Visualizations Export:** Export loss convergence curves, validation accuracy profiles, and distillation soft-target metrics for the final documentation.
 
 ## Documentation and Final Report

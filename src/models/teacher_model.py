@@ -1,18 +1,14 @@
-import os
-import sys
-
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
 import torch
 import torch.nn as nn
 
 class TeacherDeepLOB(nn.Module):
     def __init__(self, num_classes: int = 3):
         """
-        DeepLOB architecture acting as the high-capacity Teacher model.
+        Simplified DeepLOB-style architecture acting as the high-capacity Teacher model.
         Processes spatial LOB depth levels via 2D Convolutions and temporal dynamics via LSTM.
+
+        Note: this is a reduced variant of Zhang et al. (2019) - it uses a single
+        temporal convolution instead of the original parallel Inception module.
         """
         super(TeacherDeepLOB, self).__init__()
         
@@ -58,11 +54,13 @@ class TeacherDeepLOB(nn.Module):
         x = self.conv1(x)  # Out: (B, 16, T, 20)
         x = self.conv2(x)  # Out: (B, 16, T, 10)
         x = self.conv3(x)  # Out: (B, 32, T, 1)
-        x = self.conv4(x)  # Out: (B, 32, T, 1)
-        
+        # conv4 has kernel (4, 1) with padding (1, 0), so the temporal axis
+        # shrinks from T to T-1 (e.g. 10 -> 9).
+        x = self.conv4(x)  # Out: (B, 32, T-1, 1)
+
         # Reshape spatial context tensor maps for LSTM sequence compliance
-        x = x.squeeze(3)       # Out: (B, 32, T)
-        x = x.transpose(1, 2)  # Out: (B, T, 32)
+        x = x.squeeze(3)       # Out: (B, 32, T-1)
+        x = x.transpose(1, 2)  # Out: (B, T-1, 32)
         
         # Forward sequence execution through LSTM layers
         lstm_out, _ = self.lstm(x)

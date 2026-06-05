@@ -1,12 +1,30 @@
+# Secrets / environment
 .env
-.venv
+.env.*
+!.env.example
 
+# Virtual environments
+.venv
+.venv-*/
+
+# Data (downloaded locally, not versioned)
 data/raw
 data/processed
 datasets/
 
+# Training artifacts / checkpoints
 run_*/
-
+models/saved/
+*.pt
+*.ckpt
 wandb/
 
-__pycache__
+# Local notes
+notes
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
