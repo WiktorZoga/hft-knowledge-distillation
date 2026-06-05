@@ -12,6 +12,7 @@ The repository manages its dependencies via `uv`. Install the required environme
 
 ```bash
 uv sync
+
 ```
 
 Credentials are read from a local `.env` file (git-ignored). Copy the template and fill in your keys:
@@ -19,6 +20,7 @@ Credentials are read from a local `.env` file (git-ignored). Copy the template a
 ```bash
 cp .env.example .env
 # edit .env -> KAGGLE_USERNAME / KAGGLE_KEY (for downloads), WANDB_API_KEY (for logging)
+
 ```
 
 ---
@@ -30,6 +32,7 @@ Download the FI2010 dataset from [Kaggle](https://www.kaggle.com/datasets/freema
 
 ```bash
 uv run python scripts/download_data.py
+
 ```
 
 This produces `datasets/FI2010_train.csv` and `datasets/FI2010_test.csv`. The pipeline reads these
@@ -91,17 +94,17 @@ uv run python scripts/evaluate.py --teacher_run run_xxx --student_run run_yyy
 
 ### 4. Production Inference Engine
 
-Executes standalone inference for a selected model type on a single, raw LOB text file. It parses inputs, applies runtime normalization, and generates a signal distribution breakdown.
+Executes standalone inference for a selected model type on a single, clean preprocessed CSV segment file. It parses inputs, applies runtime normalization, and generates a signal distribution breakdown.
 
 ```bash
 # Run pure mathematical baseline inference:
-uv run python scripts/inference.py --model_type baseline --data_path datasets/Test_Dst_NoAuction_DecPre_CF_7.txt --threshold 0.15
+uv run python scripts/inference.py --model_type baseline --data_path datasets/FI2010_test.csv --threshold 0.15
 
 # Run inference using a pre-trained Teacher checkpoint:
-uv run python scripts/inference.py --model_type teacher --weights models/saved/teacher/run_xxx/best_teacher.pt --data_path datasets/Test_Dst_NoAuction_DecPre_CF_7.txt
+uv run python scripts/inference.py --model_type teacher --weights run_xxx/best_teacher.pt --data_path datasets/FI2010_test.csv
 
 # Run inference using a distilled Student checkpoint:
-uv run python scripts/inference.py --model_type student --weights models/saved/student/run_yyy/best_student.pt --data_path datasets/Test_Dst_NoAuction_DecPre_CF_7.txt
+uv run python scripts/inference.py --model_type student --weights run_yyy/best_student.pt --data_path datasets/FI2010_test.csv
 
 ```
 
@@ -111,6 +114,52 @@ Runs an Optuna study over the distillation hyperparameters (`lr`, `weight_decay`
 
 ```bash
 uv run python scripts/tune.py --teacher_run run_xxx --trials 20 --epochs 5
+
+```
+
+---
+
+## Market Microstructure Analytics & Hard Cases
+
+To prevent validation leakage, high-volatility anomalies and structural market breakdowns are extracted and validated strictly using expert quantitative filters.
+
+### 1. Extract Expert Hard Cases
+
+Processes `FI2010_train.csv`, isolates the 5 asset structures sequentially, and scans for core mathematical anomalies (e.g., Iceberg Order signatures via volume shocks or Level 1 vs Deep Book volume contradictions). It generates a global JSON lookup index and outputs initial baseline visual dashboards.
+
+```bash
+uv run python scripts/extract_expert_hard_cases.py
+
+```
+
+*Outputs: Reusable lookup registry saved at `reports/analysis/hard_cases_registry.json` and preview dashboards partitioned into `reports/analysis/asset_[1-5]/`.*
+
+### 2. Plot Custom Range Alignment
+
+Allows custom, on-demand visualization slices "from the console" across any arbitrary tick interval for a chosen asset. It runs inference across all models simultaneously to construct a multi-level comparative dashboard featuring correct vertical axis alignments (Up on top, Down at bottom).
+
+```bash
+uv run python scripts/plot_custom_range.py \
+  --asset_id 3 \
+  --left 5000 \
+  --right 5400 \
+  --teacher_weights run_xxx/best_teacher.pt \
+  --student_weights run_yyy/best_student.pt
+
+```
+
+*Outputs: High-density plot dashboards matching the bounds saved inside `reports/analysis/asset_3/custom_range_5000_5400.png`.*
+
+### 3. Evaluate Isolated Hard Cases
+
+Loads the generated JSON lookup map, extracts the matching contextual sliding windows directly from the data stream, and evaluates neural networks exclusively under these high-difficulty rynkowe regimes.
+
+```bash
+uv run python scripts/evaluate_hard_cases.py \
+  --teacher_weights run_xxx/best_teacher.pt \
+  --student_weights run_yyy/best_student.pt \
+  --window_size 50
+
 ```
 
 ---
@@ -123,4 +172,5 @@ Logging is configured in `config/config.yaml` (`wandb.project` / `wandb.mode`) a
 
 ```bash
 uv run python scripts/train_teacher.py --wandb_mode disabled   # online | offline | disabled
+
 ```

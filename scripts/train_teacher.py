@@ -20,7 +20,7 @@ from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
-from src.utils import resolve_device, set_seed
+from src.utils.utils import resolve_device, set_seed
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Teacher Model (DeepLOB)")

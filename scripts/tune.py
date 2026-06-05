@@ -20,7 +20,7 @@ from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
-from src.utils import resolve_device, set_seed
+from src.utils.utils import resolve_device, set_seed
 
 # Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
 CLASS_NAMES = ["up", "flat", "down"]

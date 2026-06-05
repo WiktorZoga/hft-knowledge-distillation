@@ -14,7 +14,7 @@ if PROJECT_ROOT not in sys.path:
 from src.models.baseline import QueueImbalanceBaseline
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
-from src.utils import resolve_device
+from src.utils.utils import resolve_device
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Production Inference Script for LOB Models")
