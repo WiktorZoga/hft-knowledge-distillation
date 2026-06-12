@@ -23,6 +23,26 @@ from torch.utils.data import Dataset
 
 NUM_FEATURES = 40
 NUM_LABELS = 5
+NUM_STOCKS = 5
+
+
+def split_by_stock(features: np.ndarray, labels: np.ndarray, n_stocks: int = NUM_STOCKS):
+    """Split concatenated FI2010 arrays into per-stock segments.
+
+    The Dst files concatenate 5 stocks vertically with no explicit marker, so
+    the boundaries are recovered as the ``n_stocks - 1`` largest jumps in the
+    L1 ask price (same heuristic as the lob-deep-learning reference repo).
+    On both shipped CSVs the four largest jumps are ~5-200x bigger than the
+    fifth, so the recovery is unambiguous.
+
+    Returns:
+        List of ``(features, labels)`` tuples, one per stock, in file order.
+    """
+    jumps = np.abs(np.diff(features[:, 0]))
+    boundaries = np.sort(np.argsort(jumps)[-(n_stocks - 1):]) + 1
+    edges = [0, *boundaries.tolist(), len(features)]
+    return [(features[edges[i]: edges[i + 1]], labels[edges[i]: edges[i + 1]])
+            for i in range(n_stocks)]
 
 
 def load_fi2010_arrays(file_paths, use_subset: bool = False, subset_size: int = 5000):
@@ -80,6 +100,12 @@ class FI2010Dataset(Dataset):
 
     def __len__(self) -> int:
         return self.num_samples
+
+    def windowed_targets(self) -> np.ndarray:
+        """Labels actually consumed by ``__getitem__`` (horizon column, offset
+        by ``window_size - 1``). Used for class-weight computation."""
+        start = self.window_size - 1
+        return self.labels[start: start + self.num_samples, self.prediction_horizon_idx]
 
     def __getitem__(self, idx: int):
         x = self.features[idx: idx + self.window_size]

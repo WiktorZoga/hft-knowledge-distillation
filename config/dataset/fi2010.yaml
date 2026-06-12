@@ -4,7 +4,14 @@ processed_data_dir: "data/processed"
 window_size: 50
 num_features: 40
 num_classes: 3
-prediction_horizon_idx: 0 
+# Which of the 5 FI2010 label columns to predict: idx 0..4 = horizons
+# k = 10, 20, 30, 50, 100 order-book events.
+prediction_horizon_idx: 0
+
+# Which stock(s) to train/evaluate on. FI2010 concatenates 5 stocks; boundaries
+# are recovered from L1 ask-price jumps (see src/data/dataset.py:split_by_stock).
+# "all" = every stock (windows never cross stock boundaries), or an int 0..4.
+stock: all
 
 batch_size: 512
 train_ratio: 0.8
