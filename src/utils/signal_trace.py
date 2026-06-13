@@ -165,6 +165,13 @@ def render_signal_trace_figure(trace: dict[str, np.ndarray], title: str) -> plt.
         if trace["depth_divergence"][i]:
             ax.scatter(tick, gt[i], color="darkorange", s=80, zorder=5, marker="X")
 
+    handles, labels = ax.get_legend_handles_labels()
+    handles.extend([
+        plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="crimson", markersize=8),
+        plt.Line2D([0], [0], marker="X", color="none", markerfacecolor="darkorange", markersize=8),
+    ])
+    labels.extend(["Volume shock (hard)", "Depth divergence (hard)"])
+
     ax.set_yticks([0, 1, 2])
     ax.set_yticklabels(["Up", "Flat", "Down"])
     ax.invert_yaxis()
@@ -172,7 +179,7 @@ def render_signal_trace_figure(trace: dict[str, np.ndarray], title: str) -> plt.
     ax.set_xlabel("Stock-Relative Tick")
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.3)
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0, ncol=1)
+    ax.legend(handles, labels, loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0, ncol=1)
     fig.subplots_adjust(right=0.82)
     return fig
 
