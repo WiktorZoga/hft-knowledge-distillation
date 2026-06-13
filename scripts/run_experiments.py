@@ -79,7 +79,7 @@ def run_script(script: str, cli_args: list) -> bool:
 @torch.no_grad()
 def collect_predictions(predict_fn, dataloader, desc):
     all_true, all_pred = [], []
-    for x, y in tqdm(dataloader, desc=desc, unit="batch", leave=False):
+    for x, y, _ in tqdm(dataloader, desc=desc, unit="batch", leave=False):
         all_pred.append(predict_fn(x))
         all_true.append(y.numpy())
     return np.concatenate(all_true), np.concatenate(all_pred)

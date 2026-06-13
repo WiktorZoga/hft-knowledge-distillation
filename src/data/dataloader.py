@@ -82,13 +82,13 @@ def create_dataloaders(overrides: dict = None):
     test_segments = split_by_stock(*load_fi2010_arrays(test_files))
 
     train_parts, val_parts, test_parts = [], [], []
+    val_offsets = []
     for idx in stock_indices:
         feats, labels = train_segments[idx]
         if use_subset:
             feats, labels = feats[:subset_size], labels[:subset_size]
-        # Temporal split per stock: validation samples come strictly after
-        # training samples, avoiding look-ahead leakage.
         split_idx = int(len(feats) * train_ratio)
+        val_offsets.append(split_idx)
         train_parts.append((feats[:split_idx], labels[:split_idx]))
         val_parts.append((feats[split_idx:], labels[split_idx:]))
 
@@ -104,16 +104,32 @@ def create_dataloaders(overrides: dict = None):
     std = pooled_train.std(axis=0)
     std[std == 0] = 1.0
 
-    def build(parts):
+    hardness_cfg = data_cfg.get("hardness")
+
+    def build(parts, timeline_offsets, stock_idxs):
         datasets = [
-            FI2010Dataset(feats, labels, window_size=window_size,
-                          prediction_horizon_idx=horizon_idx, mean=mean, std=std)
-            for feats, labels in parts
+            FI2010Dataset(
+                feats, labels, window_size=window_size,
+                prediction_horizon_idx=horizon_idx, mean=mean, std=std,
+                hardness_cfg=hardness_cfg, timeline_offset=offset, stock_index=stock_idx,
+            )
+            for (feats, labels), offset, stock_idx in zip(parts, timeline_offsets, stock_idxs)
         ]
         return ConcatDataset(datasets)
 
-    train_loader = DataLoader(build(train_parts), batch_size=batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(build(val_parts), batch_size=batch_size, shuffle=False, drop_last=False)
-    test_loader = DataLoader(build(test_parts), batch_size=batch_size, shuffle=False, drop_last=False)
+    train_offsets = [0] * len(train_parts)
+
+    train_loader = DataLoader(
+        build(train_parts, train_offsets, stock_indices),
+        batch_size=batch_size, shuffle=True, drop_last=True,
+    )
+    val_loader = DataLoader(
+        build(val_parts, val_offsets, stock_indices),
+        batch_size=batch_size, shuffle=False, drop_last=False,
+    )
+    test_loader = DataLoader(
+        build(test_parts, [0] * len(test_parts), stock_indices),
+        batch_size=batch_size, shuffle=False, drop_last=False,
+    )
 
     return train_loader, val_loader, test_loader

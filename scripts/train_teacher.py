@@ -20,6 +20,7 @@ from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
+from src.utils.hardness_metrics import compute_hardness_metrics, count_hardness_samples
 from src.utils.utils import log_confusion_matrix, resolve_device, set_seed
 
 def parse_args():
@@ -63,9 +64,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, total_ep
     total = 0
     all_preds = []
     all_targets = []
+    all_hard = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Train)", unit="batch", leave=False)
-    for x, y in pbar:
+    for x, y, hard in pbar:
         x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
@@ -80,6 +82,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, total_ep
         correct += predicted.eq(y).sum().item()
         all_preds.append(predicted.cpu())
         all_targets.append(y.cpu())
+        all_hard.append(hard.cpu())
 
         wandb.log({
             "train/batch_loss": loss.item(),
@@ -89,7 +92,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, total_ep
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
     f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
-    return running_loss / total, correct / total, f1_macro, f1_per_class
+    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, "train")
+    return running_loss / total, correct / total, f1_macro, f1_per_class, hard_metrics
 
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
@@ -99,9 +103,10 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
     total = 0
     all_preds = []
     all_targets = []
+    all_hard = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Val)", unit="batch", leave=False)
-    for x, y in pbar:
+    for x, y, hard in pbar:
         x, y = x.to(device), y.to(device)
         outputs = model(x)
         loss = criterion(outputs, y)
@@ -112,13 +117,15 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
         correct += predicted.eq(y).sum().item()
         all_preds.append(predicted.cpu())
         all_targets.append(y.cpu())
+        all_hard.append(hard.cpu())
 
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
     f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
+    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, "val")
     y_true = torch.cat(all_targets).numpy()
     y_pred = torch.cat(all_preds).numpy()
-    return running_loss / total, correct / total, f1_macro, f1_per_class, y_true, y_pred
+    return running_loss / total, correct / total, f1_macro, f1_per_class, hard_metrics, y_true, y_pred
 
 # Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
 CLASS_NAMES = ["up", "flat", "down"]
@@ -208,6 +215,14 @@ def main():
           f"horizon idx: {data_cfg['prediction_horizon_idx']}")
     train_loader, val_loader, _ = create_dataloaders(overrides=data_overrides)
 
+    train_hard_stats = count_hardness_samples(train_loader.dataset)
+    val_hard_stats = count_hardness_samples(val_loader.dataset)
+    wandb.config.update({
+        "dataset/train_hard_windows": train_hard_stats,
+        "dataset/val_hard_windows": val_hard_stats,
+    })
+    print(f"Hard windows -> train: {train_hard_stats} | val: {val_hard_stats}")
+
     model = TeacherDeepLOB(num_classes=3).to(device)
 
     # Class-imbalance handling: weight CE by inverse training-class frequency.
@@ -240,8 +255,12 @@ def main():
     print(f"Early stopping on '{monitor}' with patience={patience}")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss, train_acc, train_f1, train_f1_pc = train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs)
-        val_loss, val_acc, val_f1, val_f1_pc, val_true, val_pred = evaluate(model, val_loader, criterion, device, epoch, total_epochs)
+        train_loss, train_acc, train_f1, train_f1_pc, train_hard = train_epoch(
+            model, train_loader, criterion, optimizer, device, epoch, total_epochs
+        )
+        val_loss, val_acc, val_f1, val_f1_pc, val_hard, val_true, val_pred = evaluate(
+            model, val_loader, criterion, device, epoch, total_epochs
+        )
 
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
               f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1:.4f} || "
@@ -260,6 +279,8 @@ def main():
         for cls in CLASS_NAMES:
             log_payload[f"train/epoch_f1_{cls}"] = train_f1_pc[cls]
             log_payload[f"val/epoch_f1_{cls}"] = val_f1_pc[cls]
+        log_payload.update(train_hard)
+        log_payload.update(val_hard)
         wandb.log(log_payload)
 
         current = val_f1 if monitor == "val_f1_macro" else val_acc

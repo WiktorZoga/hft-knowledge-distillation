@@ -21,6 +21,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.utils.hardness_filters import check_depth_divergence, check_volume_shock
+
 NUM_FEATURES = 40
 NUM_LABELS = 5
 NUM_STOCKS = 5
@@ -83,9 +85,13 @@ class FI2010Dataset(Dataset):
     """
 
     def __init__(self, features: np.ndarray, labels: np.ndarray, window_size: int = 10,
-                 prediction_horizon_idx: int = 0, mean: np.ndarray = None, std: np.ndarray = None):
+                 prediction_horizon_idx: int = 0, mean: np.ndarray = None, std: np.ndarray = None,
+                 hardness_cfg: dict | None = None, timeline_offset: int = 0,
+                 stock_index: int | None = None):
         self.window_size = window_size
         self.prediction_horizon_idx = prediction_horizon_idx
+        self.timeline_offset = timeline_offset
+        self.stock_index = stock_index
 
         if mean is None or std is None:
             mean = features.mean(axis=0)
@@ -94,9 +100,13 @@ class FI2010Dataset(Dataset):
         self.mean = mean
         self.std = std
 
-        self.features = ((features - mean) / std).astype(np.float32)
+        raw_features = features.astype(np.float32)
+        self.features = ((raw_features - mean) / std).astype(np.float32)
         self.labels = labels.astype(np.int64)
         self.num_samples = max(0, len(self.features) - window_size + 1)
+        self.volume_shock_mask, self.depth_divergence_mask = self._build_hardness_masks(
+            raw_features, hardness_cfg or {}
+        )
 
     def __len__(self) -> int:
         return self.num_samples
@@ -107,8 +117,34 @@ class FI2010Dataset(Dataset):
         start = self.window_size - 1
         return self.labels[start: start + self.num_samples, self.prediction_horizon_idx]
 
+    def _build_hardness_masks(self, raw_features: np.ndarray, hardness_cfg: dict):
+        """Pre-compute expert hard-case tags for each sliding window."""
+        volume_shock = np.zeros(self.num_samples, dtype=bool)
+        depth_divergence = np.zeros(self.num_samples, dtype=bool)
+        if self.num_samples == 0:
+            return volume_shock, depth_divergence
+
+        horizon_labels = self.labels[:, self.prediction_horizon_idx]
+        price_std_thresh = hardness_cfg.get("price_std_thresh", 0.05)
+        vol_skew_thresh = hardness_cfg.get("vol_skew_thresh", 1.8)
+
+        for idx in range(self.num_samples):
+            tick = idx + self.window_size - 1
+            if check_volume_shock(
+                raw_features, horizon_labels, tick, price_std_thresh, vol_skew_thresh
+            ):
+                volume_shock[idx] = True
+            if check_depth_divergence(raw_features, horizon_labels, tick):
+                depth_divergence[idx] = True
+
+        return volume_shock, depth_divergence
+
     def __getitem__(self, idx: int):
         x = self.features[idx: idx + self.window_size]
         target_idx = idx + self.window_size - 1
         y = self.labels[target_idx, self.prediction_horizon_idx]
-        return torch.from_numpy(np.ascontiguousarray(x)), torch.tensor(y, dtype=torch.long)
+        hard = torch.tensor(
+            [self.volume_shock_mask[idx], self.depth_divergence_mask[idx]],
+            dtype=torch.bool,
+        )
+        return torch.from_numpy(np.ascontiguousarray(x)), torch.tensor(y, dtype=torch.long), hard

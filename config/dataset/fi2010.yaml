@@ -15,3 +15,21 @@ stock: all
 
 batch_size: 512
 train_ratio: 0.8
+
+# Expert hard-case filters (volume shock / depth divergence).
+hardness:
+  price_std_thresh: 0.05
+  vol_skew_thresh: 1.8
+
+# Bottom-panel signal trace logged to W&B during student distillation.
+signal_trace:
+  enabled: true
+  log_every_epochs: 5
+  stock: 2              # 0-indexed (2 = Asset 3)
+  mode: auto            # auto | fixed
+  window_length: 150
+  min_hard_cases: 1
+  max_flat_ratio: 0.95
+  # fixed mode only (stock-relative ticks; must fall in validation region):
+  # tick_start: 5150
+  # tick_end: 5300

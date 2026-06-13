@@ -20,6 +20,8 @@ from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
+from src.utils.hardness_metrics import compute_hardness_metrics, count_hardness_samples
+from src.utils.signal_trace import log_signal_trace, select_signal_trace_window, get_val_dataset_for_stock
 from src.utils.utils import log_confusion_matrix, resolve_device, set_seed
 
 def parse_args():
@@ -82,9 +84,10 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
     total = 0
     all_preds = []
     all_targets = []
+    all_hard = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Student Train)", unit="batch", leave=False)
-    for x, y in pbar:
+    for x, y, hard in pbar:
         x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
@@ -103,6 +106,7 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
         correct += predicted.eq(y).sum().item()
         all_preds.append(predicted.cpu())
         all_targets.append(y.cpu())
+        all_hard.append(hard.cpu())
 
         wandb.log({
             "student_train/batch_loss": loss.item(),
@@ -112,7 +116,8 @@ def train_student_epoch(student, teacher, dataloader, criterion, optimizer, devi
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
     f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
-    return running_loss / total, correct / total, f1_macro, f1_per_class
+    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, "student_train")
+    return running_loss / total, correct / total, f1_macro, f1_per_class, hard_metrics
 
 @torch.no_grad()
 def evaluate_student(student, dataloader, device, epoch, total_epochs):
@@ -121,9 +126,10 @@ def evaluate_student(student, dataloader, device, epoch, total_epochs):
     total = 0
     all_preds = []
     all_targets = []
+    all_hard = []
 
     pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Student Val)", unit="batch", leave=False)
-    for x, y in pbar:
+    for x, y, hard in pbar:
         x, y = x.to(device), y.to(device)
         outputs = student(x)
 
@@ -132,13 +138,15 @@ def evaluate_student(student, dataloader, device, epoch, total_epochs):
         correct += predicted.eq(y).sum().item()
         all_preds.append(predicted.cpu())
         all_targets.append(y.cpu())
+        all_hard.append(hard.cpu())
 
         pbar.set_postfix({"acc": f"{(correct/total)*100:.2f}%"})
 
     f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
+    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, "student_val")
     y_true = torch.cat(all_targets).numpy()
     y_pred = torch.cat(all_preds).numpy()
-    return correct / total, f1_macro, f1_per_class, y_true, y_pred
+    return correct / total, f1_macro, f1_per_class, hard_metrics, y_true, y_pred
 
 def main():
     args = parse_args()
@@ -196,6 +204,36 @@ def main():
           f"horizon idx: {data_cfg['prediction_horizon_idx']}")
     train_loader, val_loader, _ = create_dataloaders(overrides=data_overrides)
 
+    train_hard_stats = count_hardness_samples(train_loader.dataset)
+    val_hard_stats = count_hardness_samples(val_loader.dataset)
+    wandb.config.update({
+        "dataset/train_hard_windows": train_hard_stats,
+        "dataset/val_hard_windows": val_hard_stats,
+    })
+    print(f"Hard windows -> train: {train_hard_stats} | val: {val_hard_stats}")
+
+    signal_trace_cfg = data_cfg.get("signal_trace", {})
+    trace_window_meta = None
+    if signal_trace_cfg.get("enabled", False):
+        try:
+            trace_ds = get_val_dataset_for_stock(
+                val_loader.dataset, signal_trace_cfg.get("stock", 2)
+            )
+            trace_window = select_signal_trace_window(trace_ds, signal_trace_cfg)
+            if trace_window:
+                trace_window_meta = {
+                    "stock_index": trace_window.stock_index,
+                    "tick_start": trace_window.tick_start,
+                    "tick_end": trace_window.tick_end,
+                    "mode": signal_trace_cfg.get("mode", "auto"),
+                }
+                print(f"Signal trace window: {trace_window_meta}")
+        except ValueError as exc:
+            print(f"[signal_trace] Could not pre-select window: {exc}")
+
+    if trace_window_meta:
+        wandb.config.update({"signal_trace/window": trace_window_meta})
+
     print(f"Loading pre-trained Teacher model weights from run sequence: {args.teacher_run}...")
     teacher = TeacherDeepLOB(num_classes=data_cfg["num_classes"]).to(device)
     teacher_weights_path = root_path / teacher_cfg["save_dir"] / args.teacher_run / teacher_cfg["checkpoint_name"]
@@ -213,16 +251,19 @@ def main():
 
     best_val_acc = 0.0
     total_epochs = student_cfg["epochs"]
+    log_trace_every = signal_trace_cfg.get("log_every_epochs", 5)
 
     print(f"\nStarting Student Distillation optimization loop on target device: {device}")
     print(f"Target run workspace directory: {run_dir}")
     print("=======================================================================")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss, train_acc, train_f1, train_f1_pc = train_student_epoch(
+        train_loss, train_acc, train_f1, train_f1_pc, train_hard = train_student_epoch(
             student, teacher, train_loader, criterion, optimizer, device, epoch, total_epochs
         )
-        val_acc, val_f1, val_f1_pc, val_true, val_pred = evaluate_student(student, val_loader, device, epoch, total_epochs)
+        val_acc, val_f1, val_f1_pc, val_hard, val_true, val_pred = evaluate_student(
+            student, val_loader, device, epoch, total_epochs
+        )
 
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
               f"Student Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Train F1: {train_f1:.4f} || "
@@ -240,13 +281,30 @@ def main():
         for cls in CLASS_NAMES:
             log_payload[f"student/epoch_train_f1_{cls}"] = train_f1_pc[cls]
             log_payload[f"student/epoch_val_f1_{cls}"] = val_f1_pc[cls]
+        log_payload.update(train_hard)
+        log_payload.update(val_hard)
         wandb.log(log_payload)
+
+        should_log_trace = (
+            signal_trace_cfg.get("enabled", False)
+            and log_trace_every > 0
+            and (epoch % log_trace_every == 0 or epoch == total_epochs)
+        )
+        if should_log_trace:
+            log_signal_trace(
+                val_loader.dataset, teacher, student, device,
+                signal_trace_cfg, epoch, key_prefix="student_val",
+            )
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(student.state_dict(), checkpoint_path)
-            # Keep the logged confusion matrix in sync with the best checkpoint.
             log_confusion_matrix(val_true, val_pred, CLASS_NAMES, key_prefix="student_val")
+            if signal_trace_cfg.get("enabled", False):
+                log_signal_trace(
+                    val_loader.dataset, teacher, student, device,
+                    signal_trace_cfg, epoch, key_prefix="student_val_best",
+                )
             print(f" => Saved new optimized student verification checkpoint to: {checkpoint_path}")
 
     print("\nDISTILLATION PIPELINE COMPLETE")

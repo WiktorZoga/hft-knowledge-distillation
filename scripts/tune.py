@@ -40,7 +40,7 @@ def train_one_epoch(student, teacher, loader, criterion, optimizer, device):
     student.train()
     correct = 0
     total = 0
-    for x, y in loader:
+    for x, y, _ in loader:
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         student_logits = student(x)
@@ -61,7 +61,7 @@ def evaluate(student, loader, device):
     total = 0
     all_preds = []
     all_targets = []
-    for x, y in loader:
+    for x, y, _ in loader:
         x, y = x.to(device), y.to(device)
         outputs = student(x)
         _, predicted = outputs.max(1)
