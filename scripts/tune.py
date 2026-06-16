@@ -20,7 +20,7 @@ from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
 from src.losses.distillation_loss import KnowledgeDistillationLoss
-from src.utils import resolve_device, set_seed
+from src.utils.utils import resolve_device, set_seed
 
 # Label mapping produced by the dataloader: 0 = Up, 1 = Flat, 2 = Down.
 CLASS_NAMES = ["up", "flat", "down"]
@@ -40,7 +40,7 @@ def train_one_epoch(student, teacher, loader, criterion, optimizer, device):
     student.train()
     correct = 0
     total = 0
-    for x, y in loader:
+    for x, y, _ in loader:
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         student_logits = student(x)
@@ -61,7 +61,7 @@ def evaluate(student, loader, device):
     total = 0
     all_preds = []
     all_targets = []
-    for x, y in loader:
+    for x, y, _ in loader:
         x, y = x.to(device), y.to(device)
         outputs = student(x)
         _, predicted = outputs.max(1)

@@ -16,7 +16,7 @@ from src.data.dataloader import create_dataloaders
 from src.models.baseline import QueueImbalanceBaseline
 from src.models.teacher_model import TeacherDeepLOB
 from src.models.student_model import StudentMLP
-from src.utils import resolve_device
+from src.utils.utils import resolve_device
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Model Pipelines vs Baseline Contexts")
@@ -34,7 +34,7 @@ def evaluate_ml_model(model, dataloader, device):
     all_preds = []
     all_targets = []
     
-    for x, y in tqdm(dataloader, desc="Evaluating Model", unit="batch", leave=False):
+    for x, y, _ in tqdm(dataloader, desc="Evaluating Model", unit="batch", leave=False):
         x = x.to(device)
         outputs = model(x)
         _, predicted = outputs.max(1)
@@ -47,7 +47,7 @@ def evaluate_baseline(baseline, dataloader):
     all_preds = []
     all_targets = []
     
-    for x, y in tqdm(dataloader, desc="Evaluating Baseline", unit="batch", leave=False):
+    for x, y, _ in tqdm(dataloader, desc="Evaluating Baseline", unit="batch", leave=False):
         predicted = baseline.predict(x)
         all_preds.extend(predicted.numpy())
         all_targets.extend(y.numpy())
