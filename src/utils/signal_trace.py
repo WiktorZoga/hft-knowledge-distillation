@@ -1,4 +1,4 @@
-"""Bottom-panel signal alignment plot for W&B (GT vs teacher vs student vs baseline)."""
+"""Bottom-panel signal alignment plot for W&B (GT vs teacher vs student)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import numpy as np
 import torch
 
 from src.data.dataset import FI2010Dataset
-from src.models.baseline import QueueImbalanceBaseline
 
 
 @dataclass(frozen=True)
@@ -112,7 +111,6 @@ def collect_trace_predictions(
     teacher,
     student,
     device: torch.device,
-    baseline_threshold: float = 0.1,
 ) -> dict[str, np.ndarray]:
     """Run inference on the selected validation slice."""
     ws = dataset.window_size
@@ -134,7 +132,6 @@ def collect_trace_predictions(
     student.eval()
     teacher_preds = teacher(x).max(1)[1].cpu().numpy()
     student_preds = student(x).max(1)[1].cpu().numpy()
-    baseline_preds = QueueImbalanceBaseline(threshold=baseline_threshold).predict(x.cpu()).numpy()
 
     plot_ticks = np.arange(window.tick_start, window.tick_end + 1)
     return {
@@ -142,7 +139,6 @@ def collect_trace_predictions(
         "ground_truth": ground_truth,
         "teacher_preds": teacher_preds,
         "student_preds": student_preds,
-        "baseline_preds": baseline_preds,
         "volume_shock": volume_shock,
         "depth_divergence": depth_divergence,
     }
@@ -157,18 +153,18 @@ def render_signal_trace_figure(trace: dict[str, np.ndarray], title: str) -> plt.
     ax.plot(t, gt, label="GROUND TRUTH", color="black", lw=3.0)
     ax.plot(t, trace["teacher_preds"], label="TEACHER (DeepLOB)", color="green", linestyle="-.")
     ax.plot(t, trace["student_preds"], label="STUDENT (MLP)", color="red", linestyle="--")
-    ax.plot(t, trace["baseline_preds"], label="BASELINE (Queue Imb)", color="cyan", linestyle=":")
 
+    hard_marker_size = 24
     for i, tick in enumerate(t):
         if trace["volume_shock"][i]:
-            ax.scatter(tick, gt[i], color="crimson", s=80, zorder=5, marker="o")
+            ax.scatter(tick, gt[i], color="crimson", s=hard_marker_size, zorder=5, marker="o")
         if trace["depth_divergence"][i]:
-            ax.scatter(tick, gt[i], color="darkorange", s=80, zorder=5, marker="X")
+            ax.scatter(tick, gt[i], color="darkorange", s=hard_marker_size, zorder=5, marker="X")
 
     handles, labels = ax.get_legend_handles_labels()
     handles.extend([
-        plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="crimson", markersize=8),
-        plt.Line2D([0], [0], marker="X", color="none", markerfacecolor="darkorange", markersize=8),
+        plt.Line2D([0], [0], marker="o", color="none", markerfacecolor="crimson", markersize=5),
+        plt.Line2D([0], [0], marker="X", color="none", markerfacecolor="darkorange", markersize=5),
     ])
     labels.extend(["Volume shock (hard)", "Depth divergence (hard)"])
 

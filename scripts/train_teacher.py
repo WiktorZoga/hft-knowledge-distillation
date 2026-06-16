@@ -20,6 +20,7 @@ from sklearn.metrics import f1_score
 
 from src.data.dataloader import create_dataloaders
 from src.models.teacher_model import TeacherDeepLOB
+from src.utils.eval_benchmark import collect_teacher_latency_metrics
 from src.utils.hardness_metrics import compute_hardness_metrics, count_hardness_samples
 from src.utils.utils import log_confusion_matrix, resolve_device, set_seed
 
@@ -39,6 +40,8 @@ def parse_args():
                         help="Use the small dev subset regardless of config.yaml")
     parser.add_argument("--wandb_mode", type=str, choices=["online", "offline", "disabled"],
                         help="Override Weights & Biases logging mode")
+    parser.add_argument("--wandb_project", type=str, help="Override W&B project name")
+    parser.add_argument("--wandb_entity", type=str, help="Override W&B entity (username or team)")
     return parser.parse_args()
 
 
@@ -96,7 +99,16 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch, total_ep
     return running_loss / total, correct / total, f1_macro, f1_per_class, hard_metrics
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
+def evaluate(
+    model,
+    dataloader,
+    criterion,
+    device,
+    key_prefix: str = "val",
+    epoch: int | None = None,
+    total_epochs: int | None = None,
+    desc: str | None = None,
+):
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -105,7 +117,14 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
     all_targets = []
     all_hard = []
 
-    pbar = tqdm(dataloader, desc=f"Epoch [{epoch:02d}/{total_epochs}] (Val)", unit="batch", leave=False)
+    if desc is None:
+        desc = (
+            f"Epoch [{epoch:02d}/{total_epochs}] (Val)"
+            if epoch is not None and total_epochs is not None
+            else "Test"
+        )
+
+    pbar = tqdm(dataloader, desc=desc, unit="batch", leave=False)
     for x, y, hard in pbar:
         x, y = x.to(device), y.to(device)
         outputs = model(x)
@@ -122,7 +141,7 @@ def evaluate(model, dataloader, criterion, device, epoch, total_epochs):
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total)*100:.2f}%"})
 
     f1_macro, f1_per_class = compute_f1(all_targets, all_preds)
-    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, "val")
+    hard_metrics = compute_hardness_metrics(all_targets, all_preds, all_hard, key_prefix)
     y_true = torch.cat(all_targets).numpy()
     y_pred = torch.cat(all_preds).numpy()
     return running_loss / total, correct / total, f1_macro, f1_per_class, hard_metrics, y_true, y_pred
@@ -185,6 +204,8 @@ def main():
 
     wandb_cfg = main_cfg.get("wandb", {})
     wandb_mode = args.wandb_mode or wandb_cfg.get("mode", "online")
+    wandb_project = args.wandb_project or wandb_cfg.get("project", "hft-knowledge-distillation")
+    wandb_entity = args.wandb_entity or wandb_cfg.get("entity", None)
 
     set_seed(main_cfg["seed"])
     device = resolve_device(main_cfg["device"])
@@ -203,7 +224,8 @@ def main():
         yaml.safe_dump(resolved_cfg, f)
 
     wandb.init(
-        project=wandb_cfg.get("project", "hft-knowledge-distillation"),
+        project=wandb_project,
+        entity=wandb_entity,
         job_type="teacher-training",
         name=run_name,
         mode=wandb_mode,
@@ -213,15 +235,17 @@ def main():
     print("Loading data configurations and streaming pipeline...")
     print(f"Dataset variant -> stock: {data_cfg.get('stock', 'all')} | "
           f"horizon idx: {data_cfg['prediction_horizon_idx']}")
-    train_loader, val_loader, _ = create_dataloaders(overrides=data_overrides)
+    train_loader, val_loader, test_loader = create_dataloaders(overrides=data_overrides)
 
     train_hard_stats = count_hardness_samples(train_loader.dataset)
     val_hard_stats = count_hardness_samples(val_loader.dataset)
+    test_hard_stats = count_hardness_samples(test_loader.dataset)
     wandb.config.update({
         "dataset/train_hard_windows": train_hard_stats,
         "dataset/val_hard_windows": val_hard_stats,
+        "dataset/test_hard_windows": test_hard_stats,
     })
-    print(f"Hard windows -> train: {train_hard_stats} | val: {val_hard_stats}")
+    print(f"Hard windows -> train: {train_hard_stats} | val: {val_hard_stats} | test: {test_hard_stats}")
 
     model = TeacherDeepLOB(num_classes=3).to(device)
 
@@ -259,7 +283,8 @@ def main():
             model, train_loader, criterion, optimizer, device, epoch, total_epochs
         )
         val_loss, val_acc, val_f1, val_f1_pc, val_hard, val_true, val_pred = evaluate(
-            model, val_loader, criterion, device, epoch, total_epochs
+            model, val_loader, criterion, device, key_prefix="val",
+            epoch=epoch, total_epochs=total_epochs,
         )
 
         print(f"Epoch [{epoch:02d}/{total_epochs}] -> "
@@ -300,6 +325,29 @@ def main():
                 break
 
     wandb.run.summary["best/" + monitor] = best_metric
+
+    print("\nEvaluating best checkpoint on the test split...")
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    test_loss, test_acc, test_f1, test_f1_pc, test_hard, test_true, test_pred = evaluate(
+        model, test_loader, criterion, device, key_prefix="test", desc="Test",
+    )
+    log_confusion_matrix(test_true, test_pred, CLASS_NAMES, key_prefix="test")
+    latency_metrics = collect_teacher_latency_metrics(model, test_loader, device)
+    final_payload = {
+        "test/epoch_loss": test_loss,
+        "test/epoch_acc": test_acc,
+        "test/epoch_f1_macro": test_f1,
+        **{f"test/epoch_f1_{cls}": test_f1_pc[cls] for cls in CLASS_NAMES},
+        **test_hard,
+        **latency_metrics,
+    }
+    wandb.log(final_payload)
+    wandb.run.summary.update(final_payload)
+    print(
+        f"Test -> Loss: {test_loss:.4f} | Acc: {test_acc * 100:.2f}% | F1: {test_f1:.4f} "
+        f"(up {test_f1_pc['up']:.3f} / flat {test_f1_pc['flat']:.3f} / down {test_f1_pc['down']:.3f}) | "
+        f"Teacher mean latency: {latency_metrics['latency/teacher_mean_us']:.1f} µs"
+    )
 
     print("\nOPTIMIZATION PIPELINE COMPLETE")
     wandb.finish()
