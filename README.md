@@ -1,176 +1,191 @@
-# LOB Price Prediction via Knowledge Distillation
+# FI2010 LOB Direction Prediction with Knowledge Distillation
 
-This project implements a machine learning pipeline for limit order book (LOB) price direction prediction using the FI2010 dataset. 
+This project studies knowledge distillation for limit-order-book (LOB) direction prediction on FI2010. A simplified DeepLOB-style teacher is trained alongside a compact MLP student, with evaluation split by stock and prediction horizon. The HFT setting motivates the model-efficiency comparison, but this repository is not a deployable trading system.
 
-The primary goal is to distill knowledge from a high-capacity, heavy recurrent-convolutional Teacher model (`DeepLOB`) into a lightweight, shallow Student model (`MLP`). This architecture is designed to satisfy ultra-low latency constraints required in High-Frequency Trading (HFT) development workflows.
+## Task and data
 
----
+- Dataset: FI2010, containing five Finnish stocks and five prediction horizons.
+- Input: the first 40 raw LOB features, representing ten bid/ask price-volume levels.
+- Current window: `50` consecutive order-book updates (`config/dataset/fi2010.yaml`).
+- Current target: `prediction_horizon_idx: 0`, corresponding to the 10-event horizon.
+- Classes: `Up`, `Flat`, and `Down`.
 
-## Prerequisites and Installation
+The loader prefers pandas-exported CSV files (`*train*.csv` and `*test*.csv`) and falls back to classic `Train_Dst` / `Test_Dst` text files. It recovers the five stock segments from the largest L1 ask-price jumps, splits each stock temporally into 80% training and 20% validation, and creates windows independently within every stock and split. Training-only portions provide the normalization statistics, so windows do not cross stock or train/validation boundaries.
 
-The repository manages its dependencies via `uv`. Install the required environment packages using:
+## Models and training
+
+- **Queue-imbalance baseline:** predicts from the latest L1 bid/ask volume imbalance using a threshold of `0.1`.
+- **Teacher (`TeacherDeepLOB`):** a reduced DeepLOB-style model with four 2D convolutional blocks, a one-layer LSTM, and a three-class linear head. It is not an exact reproduction of the original DeepLOB architecture.
+- **Student (`StudentMLP`):** flattens the `50 × 40` input and applies linear layers `2000 → 128 → 64 → 3`, with batch normalization, ReLU activations, and dropout.
+
+Student training combines hard-label cross-entropy with the teacher's soft targets using temperature-scaled KL divergence (`alpha: 0.7`, `temperature: 4.0`). Teacher training uses inverse-frequency class weighting and early stopping on validation macro-F1; the best student checkpoint is selected by validation accuracy.
+
+## Pipeline and implemented tooling
+
+```text
+FI2010 CSV/TXT files
+  → first 40 features + stock recovery
+  → temporal 80/20 split per stock
+  → 50-step windows + training-only normalization
+  → DeepLOB-style teacher
+  → StudentMLP + distillation loss
+  → per-stock / multi-horizon test evaluation
+```
+
+The repository also includes:
+
+- W&B logging for training, validation, test, confusion matrices, hard-case metrics, signal traces, and recorded forward-pass latency.
+- Optuna tuning of student learning rate, weight decay, distillation weight, and temperature.
+- `run_experiments.py` for stock/horizon sweeps with accuracy, macro-F1, per-class F1, and normalized confusion matrices.
+- Two factual hard-case heuristics: volume-shock and depth-divergence regimes. These are analytical tags, not proof of iceberg orders, manipulation, or hidden market events.
+- CSV-based hard-case extraction, isolated evaluation, and custom-range visualization.
+
+## Repository structure
+
+```text
+config/config.yaml                    Device, W&B, and development settings
+config/dataset/fi2010.yaml            Window, horizon, stock, split, and hard-case settings
+config/model/teacher.yaml             Teacher training, class weights, and early stopping
+config/model/student.yaml             Student training settings
+config/model/distillation.yaml        Distillation alpha and temperature
+src/data/                             FI2010 loading, stock splitting, and windows
+src/models/                           Baseline, DeepLOB-style teacher, and MLP student
+src/losses/                           Temperature-scaled distillation loss
+src/utils/                            W&B, metrics, hard-case, signal-trace, and latency helpers
+scripts/train_teacher.py              Teacher training
+scripts/train_student.py              Student distillation
+scripts/evaluate.py                   Baseline/teacher/student evaluation
+scripts/run_experiments.py            Stock/horizon experiment sweep
+scripts/tune.py                       Optuna student tuning
+scripts/inference.py                  Single-file inference
+scripts/extract_expert_hard_cases.py  Hard-case registry generation
+scripts/evaluate_hard_cases.py        Hard-case model evaluation
+scripts/plot_custom_range.py          Hard-case signal visualization
+scripts/download_data.py              KaggleHub data download helper
+notebooks/                             Hard-case and split analysis notebook
+reports/analysis/                      Committed hard-case registry and plots
+adm_hft_presentation.pdf               Tracked presentation with current result charts
+docs/evaluation_results.md            Result record and metric provenance
+```
+
+## Setup and commands
+
+Install the locked environment:
 
 ```bash
 uv sync
-
 ```
 
-Credentials are read from a local `.env` file (git-ignored). Copy the template and fill in your keys:
+Copy the environment template if using W&B or downloading data with Kaggle credentials. The downloader uses `kagglehub` and copies the downloaded files into `datasets/`.
 
 ```bash
 cp .env.example .env
-# edit .env -> KAGGLE_USERNAME / KAGGLE_KEY (for downloads), WANDB_API_KEY (for logging)
-
-```
-
----
-
-## Data
-
-Download the FI2010 dataset from [Kaggle](https://www.kaggle.com/datasets/freemanone/fi2010) into the
-`datasets/` directory at the project root:
-
-```bash
 uv run python scripts/download_data.py
-
 ```
 
-This produces `datasets/FI2010_train.csv` and `datasets/FI2010_test.csv`. The pipeline reads these
-CSVs directly — no separate conversion step is needed.
-
-Each CSV was exported with pandas, so it carries a header row and a leading index column. After
-dropping both, 149 values remain per sample: 40 raw LOB features (already z-score normalised), 104
-derived features (unused), and 5 label columns (one per prediction horizon, values `{1, 2, 3}`). The
-dataloader takes the first 40 columns as features and the last 5 as labels (shifted to `{0, 1, 2}` =
-Up / Flat / Down). The training pool is split **temporally** into train/validation (no look-ahead
-leakage), and normalisation statistics are computed on the training split only.
-
-For a fast local run, set `development.use_subset: true` in `config/config.yaml` (caps each split to
-5000 samples).
-
----
-
-## Command Line Interface (CLI) Usage
-
-Execution scripts feature a built-in argument parser that reads default values from target YAML configurations or allows total parameter overrides via the console.
-
-Hardware acceleration backends (`CUDA` / `MPS` / `CPU`) are dynamically evaluated and assigned at runtime.
-
-### 1. Teacher Model Training (DeepLOB)
-
-Trains the convolutional-recurrent baseline network. Every execution creates a dedicated timestamped directory inside `models/saved/teacher/`.
+Train a teacher, then pass its run name to student distillation:
 
 ```bash
-# Execute run with default settings (teacher.yaml):
-uv run python scripts/train_teacher.py
-
-# Override standard training configurations via CLI:
-uv run python scripts/train_teacher.py --lr 0.0005 --epochs 15 --weight_decay 0.0002
-
+uv run python scripts/train_teacher.py --wandb_mode disabled
+uv run python scripts/train_student.py \
+  --teacher_run run_TEACHER_TIMESTAMP \
+  --wandb_mode disabled
 ```
 
-### 2. Student Model Distillation (MLP)
+For online W&B logging, omit `--wandb_mode disabled` or set the corresponding mode in `config/config.yaml`. Training creates local checkpoints under `models/saved/teacher/` and `models/saved/student/`.
 
-Executes the knowledge distillation training phase using combined soft target losses. It requires an explicit reference to a completed Teacher run folder from which frozen state weights are extracted.
+Evaluate selected runs:
 
 ```bash
-# Execute distillation by referencing a specific teacher run:
-uv run python scripts/train_student.py --teacher_run run_xxx
-
-# Override distillation parameters, soft target weights, and loss smoothing:
-uv run python scripts/train_student.py --teacher_run run_xxx --alpha 0.8 --temperature 5.0 --epochs 25
-
+uv run python scripts/evaluate.py \
+  --teacher_run run_TEACHER_TIMESTAMP \
+  --student_run run_STUDENT_TIMESTAMP
 ```
 
-### 3. Pipeline Evaluation Benchmarking
-
-Evaluates model outputs against the entire test data pipeline. It computes classification performance indexes (Accuracy, Precision, Recall, F1-Score) for the analytical baseline, teacher, and student models. Metrics are printed to the console and automatically saved as an `evaluation_report.txt` file inside the target run folders.
+Run single-file inference after a checkpoint has been created. The explicit window size must match the checkpoint:
 
 ```bash
-# Evaluate specific run outputs:
-uv run python scripts/evaluate.py --teacher_run run_xxx --student_run run_yyy
-
-```
-
-### 4. Production Inference Engine
-
-Executes standalone inference for a selected model type on a single, clean preprocessed CSV segment file. It parses inputs, applies runtime normalization, and generates a signal distribution breakdown.
-
-```bash
-# Run pure mathematical baseline inference:
-uv run python scripts/inference.py --model_type baseline --data_path datasets/FI2010_test.csv --threshold 0.15
-
-# Run inference using a pre-trained Teacher checkpoint:
-uv run python scripts/inference.py --model_type teacher --weights run_xxx/best_teacher.pt --data_path datasets/FI2010_test.csv
-
-# Run inference using a distilled Student checkpoint:
-uv run python scripts/inference.py --model_type student --weights run_yyy/best_student.pt --data_path datasets/FI2010_test.csv
-
-```
-
-### 5. Hyperparameter Tuning (Optuna)
-
-Runs an Optuna study over the distillation hyperparameters (`lr`, `weight_decay`, `alpha`, `temperature`), reusing a frozen teacher as the backbone. Each trial is logged as a separate W&B run.
-
-```bash
-uv run python scripts/tune.py --teacher_run run_xxx --trials 20 --epochs 5
-
-```
-
----
-
-## Market Microstructure Analytics & Hard Cases
-
-To prevent validation leakage, high-volatility anomalies and structural market breakdowns are extracted and validated strictly using expert quantitative filters.
-
-### 1. Extract Expert Hard Cases
-
-Processes `FI2010_train.csv`, isolates the 5 asset structures sequentially, and scans for core mathematical anomalies (e.g., Iceberg Order signatures via volume shocks or Level 1 vs Deep Book volume contradictions). It generates a global JSON lookup index and outputs initial baseline visual dashboards.
-
-```bash
-uv run python scripts/extract_expert_hard_cases.py
-
-```
-
-*Outputs: Reusable lookup registry saved at `reports/analysis/hard_cases_registry.json` and preview dashboards partitioned into `reports/analysis/asset_[1-5]/`.*
-
-### 2. Plot Custom Range Alignment
-
-Allows custom, on-demand visualization slices "from the console" across any arbitrary tick interval for a chosen asset. It runs inference across all models simultaneously to construct a multi-level comparative dashboard featuring correct vertical axis alignments (Up on top, Down at bottom).
-
-```bash
-uv run python scripts/plot_custom_range.py \
-  --asset_id 3 \
-  --left 5000 \
-  --right 5400 \
-  --teacher_weights run_xxx/best_teacher.pt \
-  --student_weights run_yyy/best_student.pt
-
-```
-
-*Outputs: High-density plot dashboards matching the bounds saved inside `reports/analysis/asset_3/custom_range_5000_5400.png`.*
-
-### 3. Evaluate Isolated Hard Cases
-
-Loads the generated JSON lookup map, extracts the matching contextual sliding windows directly from the data stream, and evaluates neural networks exclusively under these high-difficulty rynkowe regimes.
-
-```bash
-uv run python scripts/evaluate_hard_cases.py \
-  --teacher_weights run_xxx/best_teacher.pt \
-  --student_weights run_yyy/best_student.pt \
+uv run python scripts/inference.py \
+  --model_type student \
+  --weights models/saved/student/run_STUDENT_TIMESTAMP/best_student.pt \
+  --data_path datasets/FI2010_test.csv \
   --window_size 50
-
 ```
 
----
+`inference.py` also accepts `baseline` and `teacher`; neural models require `--weights`, while the baseline accepts `--threshold`. CSV and classic text input are supported. Inference normalizes the supplied file independently from the training split.
 
-## Experiment Tracking (Weights & Biases)
-
-Batch-level and epoch-level statistics are logged automatically to the Weights & Biases platform under the `hft-knowledge-distillation` project registry. Active run names inside WandB match the timestamped directory identifiers generated on disk.
-
-Logging is configured in `config/config.yaml` (`wandb.project` / `wandb.mode`) and authenticated via `WANDB_API_KEY` in `.env`. To run without an account or network — e.g. quick smoke tests — disable it per run:
+Optional analysis commands, run after the relevant data/checkpoints exist:
 
 ```bash
-uv run python scripts/train_teacher.py --wandb_mode disabled   # online | offline | disabled
+uv run python scripts/tune.py --teacher_run run_TEACHER_TIMESTAMP --trials 20 --epochs 5
 
+uv run python scripts/run_experiments.py \
+  --stocks all 0 1 2 3 4 \
+  --horizons 0 1 2 3 4 \
+  --wandb_mode disabled
+
+uv run python scripts/extract_expert_hard_cases.py \
+  --train_path datasets/FI2010_train.csv
+
+uv run python scripts/evaluate_hard_cases.py \
+  --train_path datasets/FI2010_train.csv \
+  --registry_path reports/analysis/hard_cases_registry.json \
+  --teacher_weights models/saved/teacher/run_TEACHER_TIMESTAMP/best_teacher.pt \
+  --student_weights models/saved/student/run_STUDENT_TIMESTAMP/best_student.pt
+
+uv run python scripts/plot_custom_range.py \
+  --data_path datasets/FI2010_train.csv \
+  --registry_path reports/analysis/hard_cases_registry.json \
+  --teacher_weights models/saved/teacher/run_TEACHER_TIMESTAMP/best_teacher.pt \
+  --student_weights models/saved/student/run_STUDENT_TIMESTAMP/best_student.pt \
+  --asset_id 3 --left 5150 --right 5300
 ```
+
+## Results
+
+The current numeric results are transcribed from the tracked [`adm_hft_presentation.pdf`](adm_hft_presentation.pdf) and summarized with provenance in [`docs/evaluation_results.md`](docs/evaluation_results.md).
+
+### Overall h0 test macro-F1
+
+| Model | Macro-F1 |
+| --- | ---: |
+| DeepLOB-style teacher | 0.70 |
+| Distilled MLP student | 0.61 |
+| Queue-imbalance baseline | 0.25 |
+
+### Multi-horizon test macro-F1
+
+| Horizon | Events | Teacher | Student |
+| --- | ---: | ---: | ---: |
+| h0 | 10 | 0.692 | 0.602 |
+| h1 | 20 | 0.608 | 0.532 |
+| h2 | 30 | 0.677 | 0.574 |
+| h3 | 50 | 0.717 | 0.621 |
+| h4 | 100 | 0.698 | 0.627 |
+
+### Recorded single-sample forward latency
+
+| Horizon | Teacher | Student |
+| --- | ---: | ---: |
+| h0 | 287 µs | 101 µs |
+| h1 | 289 µs | 107 µs |
+| h2 | 309 µs | 105 µs |
+| h3 | 280 µs | 96 µs |
+| h4 | 284 µs | 107 µs |
+
+Across these recorded measurements, the student forward pass is roughly 2.6–3.0× lower in latency than the teacher. The artifact does not record hardware, backend, or run IDs; these are batch-size-1 forward-pass measurements, not a portable production-performance benchmark. No throughput result is recorded.
+
+### Hard-case test macro-F1
+
+These values are calculated over directional `Up` / `Down` classes for the identified heuristic regimes:
+
+| Regime | Teacher | Student | Baseline |
+| --- | ---: | ---: | ---: |
+| Volume shock | 0.77 | 0.61 | 0.37 |
+| Depth divergence | 0.75 | 0.57 | 0.43 |
+
+The results do not establish that knowledge distillation improves predictive accuracy: no same-architecture student-without-KD ablation is recorded.
+
+## Limitations and future work
+
+The current project does not record parameter counts or checkpoint-size comparisons, and it has no throughput benchmark or hardware-controlled latency protocol. Useful next experiments are a student trained without KD, parameter/checkpoint comparisons, and reproducible CPU/GPU latency and throughput measurements. The tracked results also do not include run IDs or test sample counts, so those details should be added to future experiment records.
